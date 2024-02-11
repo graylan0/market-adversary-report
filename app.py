@@ -1,5 +1,4 @@
-
-import asyncio
+import os
 import logging
 import httpx
 import numpy as np
@@ -11,21 +10,45 @@ import aiosqlite
 from concurrent.futures import ThreadPoolExecutor
 import nest_asyncio
 import whisper
-from google.colab import userdata
+import time
 
 nest_asyncio.apply()
 
-OPENAI_API_KEY = userdata.get('openai_api_key')
-executor = ThreadPoolExecutor()
+# Set up logging
+logging.basicConfig(level=logging.DEBUG)
 
+# Read OpenAI API key from config.json
+with open('config.json') as config_file:
+    config_data = json.load(config_file)
+    OPENAI_API_KEY = config_data.get('openai_api_key', None)
+
+if OPENAI_API_KEY is None:
+    raise ValueError("OpenAI API key not found in config.json. Please provide a valid API key.")
+
+# Configuration
 GPT_MODEL = "gpt-3.5-turbo"
 MAX_TOKENS = 1000
 TEMPERATURE = 0.7
 
+# Get the current working directory
+current_directory = os.getcwd()
+
+# Assume your audio files are in the same directory as the script
+AUDIO_PATHS = [file for file in os.listdir(current_directory) if file.endswith(".mp3")]
+
+# Check if no MP3 files are found
+if not AUDIO_PATHS:
+    logging.error("Error: No MP3 files found in the specified directory. Please make sure there are MP3 files present.")
+    exit()
+
 async def init_db():
-    async with aiosqlite.connect('colobits.db') as db:
-        async with db.cursor() as cursor:
-            await cursor.execute(
+    with ThreadPoolExecutor() as pool:
+        await asyncio.get_event_loop().run_in_executor(pool, _init_db)
+
+def _init_db():
+    with aiosqlite.connect('colobits.db') as db:
+        with db.cursor() as cursor:
+            cursor.execute(
                 '''
                 CREATE TABLE IF NOT EXISTS analysis_table (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -36,16 +59,23 @@ async def init_db():
                 )
                 '''
             )
-            await db.commit()
+            db.commit()
+    logging.debug("Database initialization complete.")
 
-async def save_to_database(color_code, quantum_state, reply, report):
-    async with aiosqlite.connect('colobits.db') as db:
-        async with db.cursor() as cursor:
-            await cursor.execute(
+def save_to_database(color_code, quantum_state, reply, report):
+    with ThreadPoolExecutor() as pool:
+        loop = asyncio.get_event_loop()
+        loop.run_in_executor(pool, _save_to_database, color_code, quantum_state, reply, report)
+
+def _save_to_database(color_code, quantum_state, reply, report):
+    with aiosqlite.connect('colobits.db') as db:
+        with db.cursor() as cursor:
+            cursor.execute(
                 "INSERT INTO analysis_table (color_code, quantum_state, reply, report) VALUES (?, ?, ?, ?)",
                 (color_code, quantum_state, reply, report)
             )
-            await db.commit()
+            db.commit()
+    logging.debug("Data saved to the database.")
 
 @qml.qnode(qml.device("default.qubit", wires=4))
 def quantum_circuit(color_code, amplitude):
@@ -61,11 +91,23 @@ def quantum_circuit(color_code, amplitude):
     qml.CNOT(wires=[2, 3])
     return qml.probs(wires=[0, 1, 2, 3])
 
-async def sentiment_to_amplitude(text):
+def sentiment_to_amplitude(text):
+    with ThreadPoolExecutor() as pool:
+        loop = asyncio.get_event_loop()
+        return loop.run_in_executor(pool, _sentiment_to_amplitude, text)
+
+def _sentiment_to_amplitude(text):
+    logging.debug("Analyzing sentiment...")
     analysis = TextBlob(text)
     return (analysis.sentiment.polarity + 1) / 2
 
 def extract_color_code(response_text):
+    with ThreadPoolExecutor() as pool:
+        loop = asyncio.get_event_loop()
+        return loop.run_in_executor(pool, _extract_color_code, response_text)
+
+def _extract_color_code(response_text):
+    logging.debug("Extracting color code...")
     pattern = r'#([0-9a-fA-F]{3,6})'
     match = re.search(pattern, response_text)
     if match:
@@ -75,24 +117,30 @@ def extract_color_code(response_text):
         return color_code
     return None
 
-async def generate_html_color_codes(sentence, attempt=0):
+def generate_html_color_codes(sentence, attempt=0):
+    with ThreadPoolExecutor() as pool:
+        loop = asyncio.get_event_loop()
+        return loop.run_in_executor(pool, _generate_html_color_codes, sentence, attempt)
+
+def _generate_html_color_codes(sentence, attempt):
+    logging.debug("Generating HTML color codes...")
     max_retries = 4
     retry_delay = 1
 
     prompts = [
-        f"Please generate an HTML color code that best represents the emotion of an AT&T employee and their thoughts on corporate practices. Summary: '{sentence}'",
+        f"Generate an HTML color code that represents the emotion of an AT&T employee discussing corporate practices. Summary: '{sentence}'",
         f"Suggest a color code reflecting the mood of an AT&T employee when considering corporate practices. Summary: '{sentence}'?",
-        f"I need a color that matches the sentiment of an AT&T employee discussing corporate practices. Summary: '{sentence}'.",
+        f"Provide a color that matches the sentiment of an AT&T employee discussing corporate practices. Summary: '{sentence}'.",
         f"What color best captures the feelings of an AT&T employee and their views on corporate practices? Summary: '{sentence}'?"
     ]
 
     while attempt < max_retries:
         prompt = prompts[attempt]
 
-        response = await call_openai_api(prompt)
+        response = call_openai_api(prompt)
         if response.status_code == 429:
             logging.warning("Rate limit reached, will retry after delay.")
-            await asyncio.sleep(retry_delay)
+            time.sleep(retry_delay)
             retry_delay *= 2
             continue
 
@@ -108,16 +156,22 @@ async def generate_html_color_codes(sentence, attempt=0):
         else:
             logging.warning(f"No valid color code found in response. Retrying with a different prompt.")
             attempt += 1
-            await asyncio.sleep(retry_delay)
+            time.sleep(retry_delay)
 
     return None
 
-async def call_openai_api(prompt, max_retries=3, retry_delay=15):
+def call_openai_api(prompt, max_retries=3, retry_delay=15):
+    with ThreadPoolExecutor() as pool:
+        loop = asyncio.get_event_loop()
+        return loop.run_in_executor(pool, _call_openai_api, prompt, max_retries, retry_delay)
+
+def _call_openai_api(prompt, max_retries, retry_delay):
+    logging.debug(f"Calling OpenAI API with prompt: {prompt}")
     attempt = 0
     while attempt < max_retries:
         logging.debug(f"OpenAI API call attempt {attempt + 1} with prompt: {prompt}")
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:  # Increased timeout
+            with httpx.Client(timeout=30.0) as client:  # Increased timeout
                 data = {
                     "model": GPT_MODEL,
                     "messages": [
@@ -128,22 +182,31 @@ async def call_openai_api(prompt, max_retries=3, retry_delay=15):
                     "max_tokens": MAX_TOKENS
                 }
                 headers = {"Authorization": f"Bearer {OPENAI_API_KEY}"}
-                response = await client.post("https://api.openai.com/v1/chat/completions", json=data, headers=headers)
+                response = client.post("https://api.openai.com/v1/chat/completions", json=data, headers=headers)
                 response.raise_for_status()  # Raises an exception for 4XX/5XX responses
+                logging.debug(f"OpenAI API response: {response.json()}")
                 return response
         except (httpx.ReadTimeout, httpx.SSLWantReadError):
             logging.warning(f"Request attempt {attempt + 1} failed. Retrying after {retry_delay} seconds...")
-            await asyncio.sleep(retry_delay)
+            time.sleep(retry_delay)
             attempt += 1
         except Exception as e:
             logging.error(f"An unexpected error occurred: {e}")
             break  # Exit the loop if an unexpected error occurs
-    logging.debug("All attempts failed or an unexpected error occurred")
+
     return None
 
-async def whisper_integration(audio_path):
+def whisper_integration(audio_path):
+    with ThreadPoolExecutor() as pool:
+        loop = asyncio.get_event_loop()
+        return loop.run_in_executor(pool, _whisper_integration, audio_path)
+
+def _whisper_integration(audio_path):
+    logging.debug("Integrating Whisper ASR...")
     model = whisper.load_model("base")
     audio = whisper.load_audio(audio_path)
+    if audio is None:
+        return None, None  # Handle the case where loading audio fails
     audio = whisper.pad_or_trim(audio)
     mel = whisper.log_mel_spectrogram(audio).to(model.device)
     _, probs = model.detect_language(mel)
@@ -151,128 +214,89 @@ async def whisper_integration(audio_path):
     options = whisper.DecodingOptions()
     result = whisper.decode(model, mel, options)
     recognized_text = result.text
+
+    # Mask sensitive information in recognized text
+    recognized_text = re.sub(r'\b\d{4}\b', '****', recognized_text)  # Mask 4-digit pins
+    recognized_text = re.sub(r'\b\d{5}-\d{4}\b', '*****-****', recognized_text)  # Mask ZIP+4 codes
+    recognized_text = re.sub(r'\b\d{5}\b', '*****', recognized_text)  # Mask 5-digit ZIP codes
+    recognized_text = re.sub(r'\b\d{3}-\d{2}-\d{4}\b', '***-**-****', recognized_text)  # Mask SSN-like patterns
+
     return detected_language, recognized_text
 
-async def process_user_input(user_input, audio_path):
-    sentiment_amplitude = await sentiment_to_amplitude(user_input)
-    color_code = await generate_html_color_codes(user_input)
+def create_audio_conversations_json():
+    conversations = []
+
+    for audio_path in AUDIO_PATHS:
+        transcript_path = f"{os.path.splitext(audio_path)[0]}_transcript.txt"
+        detected_language, recognized_text = whisper_integration(audio_path)
+
+        conversation = {
+            "transcript_path": transcript_path,
+            "audio_path": audio_path,
+            "detected_language": detected_language,
+            "recognized_text": recognized_text
+        }
+
+        conversations.append(conversation)
+
+    with open('audio_conversations.json', 'w') as json_file:
+        json.dump(conversations, json_file, indent=2)
+
+def process_user_input(transcript_path, audio_path):
+    with open(transcript_path, 'r') as file:
+        user_input = file.read()
+
+    sentiment_amplitude = sentiment_to_amplitude(user_input)
+    color_code = generate_html_color_codes(user_input)
     if not color_code:
         color_code = "Error"
 
-    amplitude = await sentiment_to_amplitude(user_input)
+    amplitude = sentiment_to_amplitude(user_input)
     quantum_state = quantum_circuit(color_code, amplitude) if color_code != "Error" else "Error"
 
     # Whisper ASR integration
-    detected_language, recognized_text = await whisper_integration(audio_path)
+    detected_language, recognized_text = whisper_integration(audio_path)
 
-    advanced_interaction = await advanced_gpt4_interaction(user_input, quantum_state, color_code)
+    return {
+        "user_input": user_input,
+        "sentiment_amplitude": sentiment_amplitude,
+        "color_code": color_code,
+        "quantum_state": quantum_state,
+        "detected_language": detected_language,
+        "recognized_text": recognized_text
+    }
 
-    markdown_output = f"## User Input\n\n- **Input**:
-
- {user_input}\n\n"
-    markdown_output += f"## Sentiment Amplitude\n\n- **Amplitude**: {sentiment_amplitude}\n\n"
-    markdown_output += f"## HTML Color Code\n\n- **Color Code**: {color_code}\n\n"
-    markdown_output += f"## Quantum State: {quantum_state}\n"
-    markdown_output += f"## Detected Language: {detected_language}\n"
-    markdown_output += f"## Recognized Text (Whisper ASR): {recognized_text}\n"
-    markdown_output += f"## Advanced GPT-4 Interaction\n\n{advanced_interaction}\n\n"
-
-    return markdown_output
-
-def generate_rejection_report(conversation_text, quantum_state, color_code):
-    return f"Rejection Report:\nBased on the analysis, the following reasons were identified for rejection:\n{conversation_text}"
-
-def generate_approval_report(conversation_text, quantum_state, color_code):
-    return f"Approval Report:\nBased on the analysis, the interaction meets the criteria for approval:\n{conversation_text}"
-
-async def advanced_gpt4_interaction(conversation_text, quantum_state, color_code):
-    max_retries = 3
-    retry_delay = 1
-    pause_between_requests = 3
-
-    for attempt in range(max_retries):
-        try:
-            async with httpx.AsyncClient() as client:
-                prompt = (
-                    "This is a conversation between a host and a guest from an Airbnb-like app. "
-                    "Analyze the conversation for risk factors and compassion aspects, considering the quantum states and HTML color codes.\n\n"
-                    f"Conversation:\n{conversation_text}\n\n"
-                    f"Quantum State: {quantum_state}\n"
-                    f"HTML Color Code: {color_code}\n\n"
-                    "Agent 1 (Risk Assessment AI): [Analyzes the conversation for risk factors]\n"
-                    "Agent 2 (Compassionate Decision-Making AI): [Considers the compassion aspects of the interaction]\n\n"
-                    "The analysis should follow these guidelines: 1. Objective analysis, 2. Ethical considerations, 3. Emotional intelligence, 4. Practical advice.\n\n"
-                    "Begin the analysis: [Reply] [decision] either accept or deny the guest's safety stay consideration with the report, making sure to include either accept or deny in the report. [/Reply] [/decision]"
-                )
-
-                data = {
-                    "model": "gpt-3.5-turbo",
-                    "messages": [
-                        {"role": "system", "content": "You are two advanced AI systems."},
-                        {"role": "user", "content": prompt}
-                    ],
-                    "temperature": 0.7,
-                    "max_tokens": 300,
-                }
-                headers = {"Authorization": f"Bearer {userdata.get('openai_api_key')}"}
-                response = await client.post("https://api.openai.com/v1/chat/completions", json=data, headers=headers)
-
-                if response.status_code == 429:
-                    logging.warning("Rate limit reached, will retry after delay.")
-                    await asyncio.sleep(retry_delay)
-                    retry_delay *= 2
-                    continue
-
-                if response.status_code != 200:
-                    logging.error(f"OpenAI API error with status code {response.status_code}: {response.text}")
-                    return f"Error in OpenAI API call: Status code {response.status_code}"
-
-                response_text = response.json()['choices'][0]['message']['content'].strip()
-
-                if re.search(r"\b(reject|deny|decline)\b", response_text, re.IGNORECASE):
-                    report = generate_rejection_report(conversation_text, quantum_state, color_code)
-                    await save_to_database(color_code, quantum_state, "deny", report)
-                    return report
-                elif re.search(r"\b(approve|accept|confirm)\b", response_text, re.IGNORECASE):
-                    report = generate_approval_report(conversation_text, quantum_state, color_code)
-                    await save_to_database(color_code, quantum_state, "accept", report)
-                    return report
-                else:
-                    return "Decision could not be determined from the analysis."
-
-        except httpx.RequestError as req_err:
-            logging.error(f"Request error occurred: {req_err}")
-            if attempt < max_retries - 1:
-                logging.info("Retrying...")
-                await asyncio.sleep(retry_delay)
-                retry_delay *= 2
-            else:
-                return "Error: Request error in OpenAI API call."
-
-async def process_conversations(conversations):
-    results = []
-    for conversation in conversations:
-        result = await process_user_input(conversation["user_input"], conversation["audio_path"])
-        results.append(result)
+def process_conversations(conversations):
+    with ThreadPoolExecutor() as pool:
+        loop = asyncio.get_event_loop()
+        tasks = [loop.run_in_executor(pool, process_user_input, conversation["transcript_path"], conversation["audio_path"]) for conversation in conversations]
+        results = loop.run_until_complete(asyncio.gather(*tasks))
     return results
 
-async def main():
-    await init_db()
+def main():
+    logging.debug("Starting main process...")
+    init_db()
+    create_audio_conversations_json()
+
     markdown_content = "# Analysis Report\n\n"
 
-    with open('synthetic_conversations.json', 'r') as file:
-        data = json.load(file)
+    with open('audio_conversations.json') as json_file:
+        conversations = json.load(json_file)
 
-    for category, conversations in data.items():
-        markdown_content += f"## {category.title()}\n\n"
-        results = await process_conversations(conversations)
-        for result in results:
-            markdown_content += result
+    results = process_conversations(conversations)
+
+    for result in results:
+        logging.debug(f"Processing user input: {result['user_input']}")
+
+        markdown_content += f"## User Input\n\n- **Input**:\n\n{result['user_input']}\n\n"
+        markdown_content += f"## Sentiment Amplitude\n\n- **Amplitude**: {result['sentiment_amplitude']}\n\n"
+        markdown_content += f"## HTML Color Code\n\n- **Color Code**: {result['color_code']}\n\n"
+        markdown_content += f"## Quantum State: {result['quantum_state']}\n"
+        markdown_content += f"## Detected Language: {result['detected_language']}\n"
+        markdown_content += f"## Recognized Text (Whisper ASR): {result['recognized_text']}\n\n"
 
     print(markdown_content)
+    logging.debug("Main process complete.")
 
 if __name__ == "__main__":
-    asyncio.run(main())
-```
-
-This code includes the modifications to the prompts in the `generate_html_color_codes` function and maintains the integration with the Whisper ASR system.
+    main()
