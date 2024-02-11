@@ -5,6 +5,7 @@ import numpy as np
 import pennylane as qml
 import re
 import json
+import asyncio
 from textblob import TextBlob
 import aiosqlite
 from concurrent.futures import ThreadPoolExecutor
